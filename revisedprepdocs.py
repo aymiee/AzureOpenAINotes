@@ -76,34 +76,7 @@ def blob_name_from_file_page(filename, page = 0):
     if os.path.splitext(filename)[1].lower() == ".pdf":
         return os.path.splitext(os.path.basename(filename))[0] + f"-{page}" + ".pdf"
     else:
-        return os.path.basename(filename)
-
-def upload_blobs(filename):
-    #uploading the contents of the file to Azure Blob Storage. Each page of the document is converted into a blob and uploaded separately.
-    blob_service = BlobServiceClient(account_url=f"https://{args.storageaccount}.blob.core.windows.net", credential=storage_creds)
-    blob_container = blob_service.get_container_client(args.container)
-    if not blob_container.exists():
-        blob_container.create_container()
-
-    # if file is PDF split into pages and upload each page as a separate blob
-    if os.path.splitext(filename)[1].lower() == ".pdf":
-        reader = PdfReader(filename)
-        pages = reader.pages
-        for i in range(len(pages)):
-            blob_name = blob_name_from_file_page(filename, i)
-            if args.verbose: print(f"\tUploading blob for page {i} -> {blob_name}")
-            f = io.BytesIO()
-            writer = PdfWriter()
-            writer.add_page(pages[i])
-            writer.write(f)
-            f.seek(0)
-            blob_container.upload_blob(blob_name, f, overwrite=True)
-    else:
-        blob_name = blob_name_from_file_page(filename)
-        with open(filename,"rb") as data:
-            blob_container.upload_blob(blob_name, data, overwrite=True)
-            
-            
+        return os.path.basename(filename)               
             
 def upload_blobs(file_content, filename):
     #uploading the contents of the file to Azure Blob Storage. Each page of the document is converted into a blob and uploaded separately.
@@ -131,7 +104,6 @@ def upload_blobs(file_content, filename):
         blob_name = blob_name_from_file_page(filename)
         f = io.BytesIO(file_content)
         blob_container.upload_blob(blob_name, f, overwrite=True)
-
 
 def remove_blobs(filename):
     if args.verbose: print(f"Removing blobs for '{filename or '<all>'}'")
@@ -285,8 +257,6 @@ def get_document_text(filename):
         file_content_in_memory = io.BytesIO(file_content)
         text = extract_text_from_docx(file_content_in_memory)
         page_map.extend((i, offset + m.start(), m.group()) for i, m in enumerate(re.finditer('.{1,1000}(?:(?<=\.\s)|$)', text, re.DOTALL)))
-
-
   
     return page_map
 
@@ -350,8 +320,6 @@ def split_text(page_map):
         
     if start + SECTION_OVERLAP < end:
         yield (all_text[start:end], find_page(start))
-
-
 
 def create_search_index():
     #This function is responsible for creating a new search index on Azure Cognitive Search service if it 
@@ -425,12 +393,10 @@ def remove_from_index(filename):
         r = search_client.delete_documents(documents=[{ "id": d["id"] } for d in r])
         if args.verbose: print(f"\tRemoved {len(r)} sections from index")
         # It can take a few seconds for search results to reflect changes, so wait a bit
-        time.sleep(2)
-        
+        time.sleep(2)       
 
 
-def download_file_content(accessToken, siteId, itemId):
-   
+def download_file_content(accessToken, siteId, itemId):   
     fileDownloadUrl = f"https://graph.microsoft.com/v1.0/sites/{siteId}/lists/companies/items/{itemId}/driveItem/content";
     headers = { 'Authorization': f'Bearer {accessToken}' }
     response = requests.get(fileDownloadUrl, headers=headers, stream=True)
@@ -464,9 +430,6 @@ def extract_text_from_excel_sheet(worksheet):
                 row_dict[header] = 'ERROR'
         data.append(row_dict)
     return data
-
-
-
 
 def extract_text_from_docx(file_content):
     document = Document(file_content)
@@ -529,8 +492,7 @@ def get_files_in_library(accessToken, siteId, libraryId):
         fileDetailsUrl = f"https://graph.microsoft.com/v1.0/sites/{siteId}/lists/{libraryId}/items/{item['id']}?expand=fields"
         fileDetailsResponse = requests.get(fileDetailsUrl, headers=headers)
         fileDetailsResponse.raise_for_status()  # Raises stored HTTPError, if one occurred
-        fileDetails = fileDetailsResponse.json()
-        
+        fileDetails = fileDetailsResponse.json()        
        
         #Customize this for yourself.  
         #I'm only uploading documents that are marked for IndexYN == YES
@@ -551,8 +513,7 @@ else:
     if not args.remove:
         create_search_index()
     
-    print(f"Processing files...")
-    
+    print(f"Processing files...")    
     
     # Get access token
     token = get_access_token(TENANT_ID, CLIENT_ID, CLIENT_SECRET)
@@ -566,7 +527,6 @@ else:
         
         # Download the file from SharePoint directly into memory
         file_content = download_file_content(token, SITE_ID, fileDetail['id'])
-
         
         if args.remove:
             remove_blobs(filename)
@@ -583,4 +543,6 @@ else:
             page_map = get_document_text(filename)
             sections = create_sections(os.path.basename(filename), page_map)
             index_sections(os.path.basename(filename), sections)
+
+
 
