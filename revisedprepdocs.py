@@ -134,55 +134,6 @@ def table_to_html(table):
     table_html += "</table>"
     return table_html
 
-def get_document_text_old(filename):
-    offset = 0
-    page_map = []
-    if args.localpdfparser:
-        reader = PdfReader(filename)
-        pages = reader.pages
-        for page_num, p in enumerate(pages):
-            page_text = p.extract_text()
-            page_map.append((page_num, offset, page_text))
-            offset += len(page_text)
-    else:
-        if args.verbose: print(f"Extracting text from '{filename}' using Azure Form Recognizer")
-        print("https://{args.formrecognizerservice}.cognitiveservices.azure.com/")
-        form_recognizer_client = DocumentAnalysisClient(endpoint=f"https://{args.formrecognizerservice}.cognitiveservices.azure.com/", credential=formrecognizer_creds, headers={"x-ms-useragent": "azure-search-chat-demo/1.0.0"})
-        with open(filename, "rb") as f:
-            poller = form_recognizer_client.begin_analyze_document("prebuilt-layout", document = f)
-        form_recognizer_results = poller.result()
-
-        for page_num, page in enumerate(form_recognizer_results.pages):
-            tables_on_page = [table for table in form_recognizer_results.tables if table.bounding_regions[0].page_number == page_num + 1]
-
-            # mark all positions of the table spans in the page
-            page_offset = page.spans[0].offset
-            page_length = page.spans[0].length
-            table_chars = [-1]*page_length
-            for table_id, table in enumerate(tables_on_page):
-                for span in table.spans:
-                    # replace all table spans with "table_id" in table_chars array
-                    for i in range(span.length):
-                        idx = span.offset - page_offset + i
-                        if idx >=0 and idx < page_length:
-                            table_chars[idx] = table_id
-
-            # build page text by replacing charcters in table spans with table html
-            page_text = ""
-            added_tables = set()
-            for idx, table_id in enumerate(table_chars):
-                if table_id == -1:
-                    page_text += form_recognizer_results.content[page_offset + idx]
-                elif not table_id in added_tables:
-                    page_text += table_to_html(tables_on_page[table_id])
-                    added_tables.add(table_id)
-
-            page_text += " "
-            page_map.append((page_num, offset, page_text))
-            offset += len(page_text)
-
-    return page_map
-
 def get_document_text(filename):
     offset = 0
     page_map = []
@@ -260,7 +211,8 @@ def get_document_text(filename):
   
     return page_map
 
-
+#This was updated to deal with Excel Files.  Savign a row into the index with rowname and column names. 
+#this will give ChatGPT a better frame of reference.
 def split_text(page_map):
     SENTENCE_ENDINGS = [".", "!", "?"]
     WORDS_BREAKS = [",", ";", ":", " ", "(", ")", "[", "]", "{", "}", "\t", "\n"]
@@ -272,54 +224,89 @@ def split_text(page_map):
             if offset >= page_map[i][1] and offset < page_map[i + 1][1]:
                 return i
         return l - 1
+    
+    if filename.lower().endswith('.xlsx'):
+        # The content is a dictionary, not text
+        # Assuming that each dictionary is a single row from the Excel file
+       
+        content_list = json.loads("[" + ", ".join(p[2] for p in page_map) + "]") # Parse the content into a list of dictionaries
 
-    all_text = "".join(p[2] for p in page_map)
-    length = len(all_text)
-    start = 0
-    end = length
-    while start + SECTION_OVERLAP < length:
-        last_word = -1
-        end = start + MAX_SECTION_LENGTH
+        for i, row in enumerate(content_list):
+            row_name = row.pop('RowName', None)  # Extract and remove the 'RowName' from the row
+            if row_name is not None:  # Check if the RowName exists
+                row_name = row_name.strip()  # Remove leading and trailing spaces
+                if row_name == '':  # Check if the stripped RowName is an empty string
+                    continue  # Skip rows with no name after stripping
+            else:
+                continue  # Skip rows with no name
 
-        if end > length:
-            end = length
-        else:
-            # Try to find the end of the sentence
-            while end < length and (end - start - MAX_SECTION_LENGTH) < SENTENCE_SEARCH_LIMIT and all_text[end] not in SENTENCE_ENDINGS:
-                if all_text[end] in WORDS_BREAKS:
-                    last_word = end
+            chunks = []  # List to hold the chunks of the row
+            chunk = {'RowName': row_name}  # Dictionary to hold the current chunk
+
+            for key, value in row.items():
+                # If adding the next key-value pair would exceed the limit, yield the current chunk
+                if len(json.dumps(chunk)) + len(json.dumps({key: value})) > MAX_SECTION_LENGTH:
+                    chunks.append(chunk)
+                    chunk = {'RowName': row_name}
+
+                chunk[key] = value
+
+            # Add the last chunk if it's not empty
+            if chunk:
+                chunks.append(chunk)
+
+            for chunk in chunks:
+                yield chunk, i
+
+    else:
+
+        all_text = "".join(p[2] for p in page_map)
+        length = len(all_text)
+        start = 0
+        end = length
+        while start + SECTION_OVERLAP < length:
+            last_word = -1
+            end = start + MAX_SECTION_LENGTH
+
+            if end > length:
+                end = length
+            else:
+                # Try to find the end of the sentence
+                while end < length and (end - start - MAX_SECTION_LENGTH) < SENTENCE_SEARCH_LIMIT and all_text[end] not in SENTENCE_ENDINGS:
+                    if all_text[end] in WORDS_BREAKS:
+                        last_word = end
+                    end += 1
+                if end < length and all_text[end] not in SENTENCE_ENDINGS and last_word > 0:
+                    end = last_word # Fall back to at least keeping a whole word
+            if end < length:
                 end += 1
-            if end < length and all_text[end] not in SENTENCE_ENDINGS and last_word > 0:
-                end = last_word # Fall back to at least keeping a whole word
-        if end < length:
-            end += 1
 
-        # Try to find the start of the sentence or at least a whole word boundary
-        last_word = -1
-        while start > 0 and start > end - MAX_SECTION_LENGTH - 2 * SENTENCE_SEARCH_LIMIT and all_text[start] not in SENTENCE_ENDINGS:
-            if all_text[start] in WORDS_BREAKS:
-                last_word = start
-            start -= 1
-        if all_text[start] not in SENTENCE_ENDINGS and last_word > 0:
-            start = last_word
-        if start > 0:
-            start += 1
+            # Try to find the start of the sentence or at least a whole word boundary
+            last_word = -1
+            while start > 0 and start > end - MAX_SECTION_LENGTH - 2 * SENTENCE_SEARCH_LIMIT and all_text[start] not in SENTENCE_ENDINGS:
+                if all_text[start] in WORDS_BREAKS:
+                    last_word = start
+                start -= 1
+            if all_text[start] not in SENTENCE_ENDINGS and last_word > 0:
+                start = last_word
+            if start > 0:
+                start += 1
 
-        section_text = all_text[start:end]
-        yield (section_text, find_page(start))
+            section_text = all_text[start:end]
+            yield (section_text, find_page(start))
 
-        last_table_start = section_text.rfind("<table")
-        if (last_table_start > 2 * SENTENCE_SEARCH_LIMIT and last_table_start > section_text.rfind("</table")):
-            # If the section ends with an unclosed table, we need to start the next section with the table.
-            # If table starts inside SENTENCE_SEARCH_LIMIT, we ignore it, as that will cause an infinite loop for tables longer than MAX_SECTION_LENGTH
-            # If last table starts inside SECTION_OVERLAP, keep overlapping
-            if args.verbose: print(f"Section ends with unclosed table, starting next section with the table at page {find_page(start)} offset {start} table start {last_table_start}")
-            start = min(end - SECTION_OVERLAP, start + last_table_start)
-        else:
-            start = end - SECTION_OVERLAP
-        
-    if start + SECTION_OVERLAP < end:
-        yield (all_text[start:end], find_page(start))
+            last_table_start = section_text.rfind("<table")
+            if (last_table_start > 2 * SENTENCE_SEARCH_LIMIT and last_table_start > section_text.rfind("</table")):
+                # If the section ends with an unclosed table, we need to start the next section with the table.
+                # If table starts inside SENTENCE_SEARCH_LIMIT, we ignore it, as that will cause an infinite loop for tables longer than MAX_SECTION_LENGTH
+                # If last table starts inside SECTION_OVERLAP, keep overlapping
+                if args.verbose: print(f"Section ends with unclosed table, starting next section with the table at page {find_page(start)} offset {start} table start {last_table_start}")
+                start = min(end - SECTION_OVERLAP, start + last_table_start)
+            else:
+                start = end - SECTION_OVERLAP
+            
+        if start + SECTION_OVERLAP < end:
+            yield (all_text[start:end], find_page(start))
 
 def create_search_index():
     #This function is responsible for creating a new search index on Azure Cognitive Search service if it 
@@ -329,6 +316,7 @@ def create_search_index():
     # The SearchIndex object includes a name and a list of fields. Each field is defined with its name, type, and other properties.
     # A SemanticSettings object is also included, which specifies configurations for semantic search capabilities. 
     # In this case, only the 'content' field is prioritized in the semantic configuration.
+    # Adding contentType
     if args.verbose: print(f"Ensuring search index {args.index} exists")
     index_client = SearchIndexClient(endpoint=f"https://{args.searchservice}.search.windows.net/",
                                      credential=search_creds)
@@ -340,7 +328,8 @@ def create_search_index():
                 SearchableField(name="content", type="Edm.String", analyzer_name="en.microsoft"),
                 SimpleField(name="category", type="Edm.String", filterable=True, facetable=True),
                 SimpleField(name="sourcepage", type="Edm.String", filterable=True, facetable=True),
-                SimpleField(name="sourcefile", type="Edm.String", filterable=True, facetable=True)
+                SimpleField(name="sourcefile", type="Edm.String", filterable=True, facetable=True),
+                SimpleField(name="contentType", type="Edm.String", filterable=True, facetable=True)
             ],
             semantic_settings=SemanticSettings(
                 configurations=[SemanticConfiguration(
@@ -404,14 +393,15 @@ def download_file_content(accessToken, siteId, itemId):
     response.raise_for_status()  # Raises stored HTTPError, if one occurred
     return response.content
 
+#concatentating rowName -  assuming the first cell in the row is the row name
 def extract_text_from_excel_sheet(worksheet):
     rows = list(worksheet.iter_rows())
     headers = [cell.value for cell in rows[0]]  # assuming the first row contains headers
 
     data = []
     for row in rows[1:]:
-        row_dict = {}
-        for header, cell in zip(headers, row):
+        row_dict = {"RowName": row[0].value}  # assuming the first cell in the row is the row name
+        for header, cell in zip(headers[1:], row[1:]):  # start from the second cell
             value = cell.value
             if cell.data_type == TYPE_FORMULA:
                 value = cell.value
@@ -437,14 +427,22 @@ def extract_text_from_docx(file_content):
     return text
 
 #WE WILL MOST LIKELY ADD A DATE FIELD AND HAVE AZURE SEARCH RETRIEVE DATA BASED ON DATE
+#PLEASE ADD content type in your index.  
+#Adding ContentType so excel can be better handled
 def create_sections(filename, page_map):
     for i, (section, pagenum) in enumerate(split_text(page_map)):
+        
+        if filename.lower().endswith('.xlsx'):
+            content_type = 'dict'
+        else:
+            content_type = 'text'            
         yield {
-            "id": re.sub("[^0-9a-zA-Z_-]","_",f"{filename}-{i}"),
-            "content": section,
+            "id": re.sub("[^0-9a-zA-Z_-]","_",f"{filename}-{i}"),           
+            "content": json.dumps(section) if isinstance(section, dict) else section,
             "category": args.category,
             "sourcepage": blob_name_from_file_page(filename, pagenum),
-            "sourcefile": filename
+            "sourcefile": filename,
+            "contentType": content_type
         }
 
 #THESE SHOULD BE MOVED TO ENV OR AZURE VAULT.  THEY ARE HERE FOR CONVENIENCE ONLY.  
