@@ -134,7 +134,7 @@ def table_to_html(table):
     table_html += "</table>"
     return table_html
 
-def get_document_text(filename):
+def get_document_text(filename, file_content):
     offset = 0
     page_map = []
     file_extension = os.path.splitext(filename)[1].lower()    
@@ -538,7 +538,7 @@ else:
                 print(filename);             
                 upload_blobs(file_content, filename)
             # You need to get the document text from the downloaded file
-            page_map = get_document_text(filename)
+            page_map = get_document_text(filename, file_content)
             sections = create_sections(os.path.basename(filename), page_map)
             index_sections(os.path.basename(filename), sections)
 
